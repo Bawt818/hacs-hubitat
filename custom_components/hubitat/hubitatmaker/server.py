@@ -111,7 +111,10 @@ class Server:
                 socket = sockets[0]
                 self.port = socket.getsockname()[1]
 
-        except Exception as e:
+        # Catch BaseException so any worker-thread startup failure is propagated to
+        # start();
+        # otherwise the finally block could wake the caller after the thread died.
+        except BaseException as e:
             self._startup_exception = e
             self._stopped = True
 
