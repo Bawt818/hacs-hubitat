@@ -111,9 +111,15 @@ class Server:
                 socket = sockets[0]
                 self.port = socket.getsockname()[1]
 
-        except BaseException as e:
+        except Exception as e:
             self._startup_exception = e
             self._stopped = True
+
+            try:
+                self._server_loop.run_until_complete(self._runner.cleanup())
+            finally:
+                self._server_loop.close()
+
             return
 
         finally:
