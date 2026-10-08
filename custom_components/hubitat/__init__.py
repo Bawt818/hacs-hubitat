@@ -30,8 +30,6 @@ from .hub import Hub, get_domain_data, get_hub
 _LOGGER = getLogger(__name__)
 _HUB_STATUS_PLATFORMS: tuple[Platform, ...] = ("binary_sensor",)
 
-# Time to attempt initial hub connection during startup
-STARTUP_CONNECT_TIMEOUT = 60  # seconds
 
 # Interval for retrying hub connection after startup failure
 RETRY_CONNECT_INTERVAL = timedelta(seconds=90)
@@ -107,8 +105,8 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
     hub.mark_platforms_setup(_HUB_STATUS_PLATFORMS)
 
     try:
-        # Try to connect with timeout
-        await asyncio.wait_for(hub.async_connect(), timeout=STARTUP_CONNECT_TIMEOUT)
+        # Try to connect
+        await hub.async_connect()
 
         _LOGGER.info("Successfully connected to Hubitat hub")
 
@@ -123,9 +121,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
             if not hub.is_connected:
                 _LOGGER.debug("Attempting to reconnect to Hubitat hub...")
                 try:
-                    await asyncio.wait_for(
-                        hub.async_connect(), timeout=STARTUP_CONNECT_TIMEOUT
-                    )
+                    await hub.async_connect()
                     _LOGGER.info("Successfully reconnected to Hubitat hub")
 
                     # Cancel the retry task now that we're connected
