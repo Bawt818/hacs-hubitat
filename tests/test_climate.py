@@ -15,7 +15,9 @@ from custom_components.hubitat.hubitatmaker.const import (
     DeviceCommand,
 )
 from custom_components.hubitat.hubitatmaker.types import Attribute
+from homeassistant.components.climate import ClimateEntity
 from homeassistant.components.climate.const import (
+    ATTR_HVAC_MODE,
     ATTR_TARGET_TEMP_HIGH,
     ATTR_TARGET_TEMP_LOW,
     FAN_AUTO,
@@ -27,6 +29,17 @@ from homeassistant.components.climate.const import (
     HVACMode,
 )
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
+
+
+def temperature_attr(thermostat: HubitatThermostat, name: str) -> Any:
+    """Read a climate temperature property by this Home Assistant version's name.
+
+    Home Assistant 2026.11 renamed these properties with a native_ prefix.
+    """
+    native_name = f"native_{name}"
+    if hasattr(ClimateEntity, native_name):
+        return getattr(thermostat, native_name)
+    return getattr(thermostat, name)
 
 
 def create_thermostat_device(**kwargs: Any) -> Mock:
@@ -97,7 +110,7 @@ def test_thermostat_init():
 
     thermostat = HubitatThermostat(hub=hub, device=device)
 
-    assert thermostat.current_temperature == 72.0
+    assert temperature_attr(thermostat, "current_temperature") == 72.0
     assert thermostat.hvac_mode == HVACMode.AUTO
 
 
@@ -112,7 +125,9 @@ def test_thermostat_temperature_unit():
 
     thermostat = HubitatThermostat(hub=hub, device=device)
 
-    assert thermostat.temperature_unit == UnitOfTemperature.FAHRENHEIT
+    assert (
+        temperature_attr(thermostat, "temperature_unit") == UnitOfTemperature.FAHRENHEIT
+    )
 
 
 def test_thermostat_celsius():
@@ -135,7 +150,7 @@ def test_thermostat_celsius():
 
     thermostat = HubitatThermostat(hub=hub, device=device)
 
-    assert thermostat.temperature_unit == UnitOfTemperature.CELSIUS
+    assert temperature_attr(thermostat, "temperature_unit") == UnitOfTemperature.CELSIUS
 
 
 def test_thermostat_heat_mode():
@@ -161,9 +176,9 @@ def test_thermostat_heat_mode():
     thermostat = HubitatThermostat(hub=hub, device=device)
 
     assert thermostat.hvac_mode == HVACMode.HEAT
-    assert thermostat.target_temperature == 68.0
-    assert thermostat.target_temperature_high is None
-    assert thermostat.target_temperature_low is None
+    assert temperature_attr(thermostat, "target_temperature") == 68.0
+    assert temperature_attr(thermostat, "target_temperature_high") is None
+    assert temperature_attr(thermostat, "target_temperature_low") is None
 
 
 def test_thermostat_cool_mode():
@@ -189,7 +204,7 @@ def test_thermostat_cool_mode():
     thermostat = HubitatThermostat(hub=hub, device=device)
 
     assert thermostat.hvac_mode == HVACMode.COOL
-    assert thermostat.target_temperature == 76.0
+    assert temperature_attr(thermostat, "target_temperature") == 76.0
 
 
 def test_thermostat_off_mode():
@@ -229,9 +244,9 @@ def test_thermostat_auto_mode_temperatures():
     thermostat = HubitatThermostat(hub=hub, device=device)
 
     assert thermostat.hvac_mode == HVACMode.AUTO
-    assert thermostat.target_temperature is None
-    assert thermostat.target_temperature_low == 68.0
-    assert thermostat.target_temperature_high == 76.0
+    assert temperature_attr(thermostat, "target_temperature") is None
+    assert temperature_attr(thermostat, "target_temperature_low") == 68.0
+    assert temperature_attr(thermostat, "target_temperature_high") == 76.0
 
 
 def test_thermostat_hvac_action_heating():
@@ -457,7 +472,7 @@ def test_thermostat_temperature_unit_fallback_and_device_attrs() -> None:
             }
         ),
     )
-    assert thermostat.temperature_unit == UnitOfTemperature.CELSIUS
+    assert temperature_attr(thermostat, "temperature_unit") == UnitOfTemperature.CELSIUS
     assert thermostat.device_attrs is not None
     assert DeviceAttribute.TEMP in thermostat.device_attrs
 
@@ -499,9 +514,276 @@ async def test_thermostat_commands() -> None:
 
 
 @pytest.mark.asyncio
+async def test_thermostat_set_temperature_with_hvac_mode() -> None:
+    thermostat = HubitatThermostat(
+        hub=Mock(token="token", temperature_unit=UnitOfTemperature.FAHRENHEIT),
+        device=create_thermostat_device(),
+    )
+    thermostat.send_command = AsyncMock()  # type: ignore[method-assign]
+
+    # Range setpoints are used for a requested auto mode even when the
+    # thermostat is currently in heat mode
+    thermostat._attr_hvac_mode = HVACMode.HEAT
+    await thermostat.async_set_temperature(
+        **{
+            ATTR_HVAC_MODE: HVACMode.AUTO,
+            ATTR_TARGET_TEMP_LOW: 59,
+            ATTR_TARGET_TEMP_HIGH: 80,
+            ATTR_TEMPERATURE: 79,
+        }
+    )
+    assert thermostat.send_command.await_args_list == [
+        call(DeviceCommand.AUTO),
+        call(DeviceCommand.SET_HEATING_SETPOINT, 59),
+        call(DeviceCommand.SET_COOLING_SETPOINT, 80),
+    ]
+
+    thermostat.send_command.reset_mock()
+    await thermostat.async_set_temperature(
+        **{
+            ATTR_HVAC_MODE: HVACMode.HEAT_COOL,
+            ATTR_TARGET_TEMP_LOW: 62,
+            ATTR_TARGET_TEMP_HIGH: 78,
+        }
+    )
+    assert thermostat.send_command.await_args_list == [
+        call(DeviceCommand.AUTO),
+        call(DeviceCommand.SET_HEATING_SETPOINT, 62),
+        call(DeviceCommand.SET_COOLING_SETPOINT, 78),
+    ]
+
+    # A single setpoint follows the requested mode, not the current one
+    thermostat._attr_hvac_mode = HVACMode.AUTO
+    thermostat.send_command.reset_mock()
+    await thermostat.async_set_temperature(
+        **{ATTR_HVAC_MODE: HVACMode.COOL, ATTR_TEMPERATURE: 74}
+    )
+    assert thermostat.send_command.await_args_list == [
+        call(DeviceCommand.COOL),
+        call(DeviceCommand.SET_COOLING_SETPOINT, 74),
+    ]
+
+    thermostat.send_command.reset_mock()
+    await thermostat.async_set_temperature(
+        **{ATTR_HVAC_MODE: HVACMode.HEAT, ATTR_TEMPERATURE: 68}
+    )
+    assert thermostat.send_command.await_args_list == [
+        call(DeviceCommand.HEAT),
+        call(DeviceCommand.SET_HEATING_SETPOINT, 68),
+    ]
+
+    # Turning off sends no setpoints
+    thermostat.send_command.reset_mock()
+    await thermostat.async_set_temperature(
+        **{ATTR_HVAC_MODE: HVACMode.OFF, ATTR_TEMPERATURE: 70}
+    )
+    assert thermostat.send_command.await_args_list == [call(DeviceCommand.OFF)]
+
+
+@pytest.mark.asyncio
+async def test_thermostat_set_temperature_without_hvac_mode() -> None:
+    thermostat = HubitatThermostat(
+        hub=Mock(token="token", temperature_unit=UnitOfTemperature.FAHRENHEIT),
+        device=create_thermostat_device(),
+    )
+    thermostat.send_command = AsyncMock()  # type: ignore[method-assign]
+
+    # Setpoints follow the current mode and no mode command is sent
+    thermostat._attr_hvac_mode = HVACMode.AUTO
+    await thermostat.async_set_temperature(
+        **{ATTR_TARGET_TEMP_LOW: 65, ATTR_TARGET_TEMP_HIGH: 75, ATTR_TEMPERATURE: 70}
+    )
+    assert thermostat.send_command.await_args_list == [
+        call(DeviceCommand.SET_HEATING_SETPOINT, 65),
+        call(DeviceCommand.SET_COOLING_SETPOINT, 75),
+    ]
+
+    thermostat._attr_hvac_mode = HVACMode.COOL
+    thermostat.send_command.reset_mock()
+    await thermostat.async_set_temperature(
+        **{ATTR_TARGET_TEMP_LOW: 65, ATTR_TARGET_TEMP_HIGH: 75, ATTR_TEMPERATURE: 74}
+    )
+    assert thermostat.send_command.await_args_list == [
+        call(DeviceCommand.SET_COOLING_SETPOINT, 74)
+    ]
+
+    thermostat._attr_hvac_mode = HVACMode.HEAT
+    thermostat.send_command.reset_mock()
+    await thermostat.async_set_temperature(**{ATTR_TEMPERATURE: 68})
+    assert thermostat.send_command.await_args_list == [
+        call(DeviceCommand.SET_HEATING_SETPOINT, 68)
+    ]
+
+    thermostat._attr_hvac_mode = HVACMode.OFF
+    thermostat.send_command.reset_mock()
+    await thermostat.async_set_temperature(**{ATTR_TEMPERATURE: 68})
+    thermostat.send_command.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_thermostat_setup_and_detection() -> None:
     assert is_thermostat(Mock(capabilities={DeviceCapability.THERMOSTAT}))
     assert not is_thermostat(Mock(capabilities=set()))
     with patch("custom_components.hubitat.climate.create_and_add_entities") as create:
         await async_setup_entry(Mock(), Mock(), Mock())
     create.assert_called_once()
+
+
+def _thermostat_with_setpoint_attrs(
+    unit: str = "F", attr_unit: str | None = None, **values: str
+) -> HubitatThermostat:
+    """Create a thermostat reporting the given setpoint attributes."""
+    attributes = {
+        DeviceAttribute.TEMP_UNIT: Attribute(
+            {
+                "name": DeviceAttribute.TEMP_UNIT,
+                "currentValue": unit,
+                "dataType": "STRING",
+                "unit": None,
+            }
+        )
+    }
+    for name, value in values.items():
+        attr = DeviceAttribute(name)
+        attributes[attr] = Attribute(
+            {
+                "name": attr,
+                "currentValue": value,
+                "dataType": "NUMBER",
+                "unit": attr_unit,
+            }
+        )
+    return HubitatThermostat(
+        hub=Mock(token="token", temperature_unit=UnitOfTemperature.FAHRENHEIT),
+        device=create_thermostat_device(attributes=attributes),
+    )
+
+
+def test_thermostat_setpoint_range_default_celsius() -> None:
+    """Celsius thermostats default to a 4.4-35 C setpoint range."""
+    thermostat = _thermostat_with_setpoint_attrs("C")
+    assert thermostat.min_temp == pytest.approx(4.4)
+    assert thermostat.max_temp == pytest.approx(35)
+    assert thermostat.target_temperature_step is None
+
+
+def test_thermostat_setpoint_range_default_fahrenheit() -> None:
+    """The default range is converted for Fahrenheit thermostats."""
+    thermostat = _thermostat_with_setpoint_attrs("F")
+    assert thermostat.min_temp == 40
+    assert thermostat.max_temp == pytest.approx(95)
+
+
+def test_thermostat_setpoint_range_reported() -> None:
+    """Device-reported setpoint limits and step override the defaults."""
+    thermostat = _thermostat_with_setpoint_attrs(
+        minSetpoint="41", maxSetpoint="90", setpointStep="0.5"
+    )
+    assert thermostat.min_temp == 41
+    assert thermostat.max_temp == 90
+    assert thermostat.target_temperature_step == 0.5
+
+
+def test_thermostat_setpoint_range_partial() -> None:
+    """A missing limit uses its default value."""
+    thermostat = _thermostat_with_setpoint_attrs(minSetpoint="41")
+    assert thermostat.min_temp == 41
+    assert thermostat.max_temp == pytest.approx(95)
+
+    thermostat = _thermostat_with_setpoint_attrs(maxSetpoint="90")
+    assert thermostat.min_temp == 40
+    assert thermostat.max_temp == 90
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"minSetpoint": "90", "maxSetpoint": "41"},
+        {"minSetpoint": "70", "maxSetpoint": "70"},
+        {"minSetpoint": "abc", "maxSetpoint": "abc"},
+        {"minSetpoint": "nan", "maxSetpoint": "1e400"},
+        {"maxSetpoint": "30"},
+    ],
+)
+def test_thermostat_setpoint_range_invalid(values: dict[str, str]) -> None:
+    """An invalid reported range falls back to the default range."""
+    thermostat = _thermostat_with_setpoint_attrs(**values)
+    assert thermostat.min_temp == 40
+    assert thermostat.max_temp == pytest.approx(95)
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "abc", "inf", "nan", "100"])
+def test_thermostat_setpoint_step_invalid(value: str) -> None:
+    """An invalid reported step is ignored."""
+    thermostat = _thermostat_with_setpoint_attrs(setpointStep=value)
+    assert thermostat.target_temperature_step is None
+
+
+def test_thermostat_setpoint_range_updates() -> None:
+    """Setpoint limits reported after startup are picked up on the next event."""
+    thermostat = _thermostat_with_setpoint_attrs(minSetpoint="41", maxSetpoint="90")
+    thermostat._device.attributes[DeviceAttribute.MIN_SETPOINT].update_value("45")
+    thermostat._device.attributes[DeviceAttribute.MAX_SETPOINT].update_value("85")
+    thermostat.load_state()
+    assert thermostat.min_temp == 45
+    assert thermostat.max_temp == 85
+
+
+def test_thermostat_setpoint_attrs_are_device_attrs() -> None:
+    """Setpoint attributes aren't also exposed as generic sensors."""
+    attrs = _thermostat_with_setpoint_attrs().device_attrs
+    assert attrs is not None
+    assert DeviceAttribute.MIN_SETPOINT in attrs
+    assert DeviceAttribute.MAX_SETPOINT in attrs
+    assert DeviceAttribute.SETPOINT_STEP in attrs
+
+
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        ({"minSetpoint": "41", "maxSetpoint": "abc"}, (41, 95)),
+        ({"minSetpoint": "nan", "maxSetpoint": "90"}, (40, 90)),
+    ],
+)
+def test_thermostat_setpoint_range_invalid_limit(
+    values: dict[str, str], expected: tuple[float, float]
+) -> None:
+    """An invalid limit only falls back to its own default."""
+    thermostat = _thermostat_with_setpoint_attrs(**values)
+    assert (thermostat.min_temp, thermostat.max_temp) == pytest.approx(expected)
+
+
+def test_thermostat_setpoint_range_reported_celsius() -> None:
+    """Reported limits on a Celsius thermostat are used as-is."""
+    thermostat = _thermostat_with_setpoint_attrs(
+        "C", minSetpoint="5", maxSetpoint="30", setpointStep="0.5"
+    )
+    assert thermostat.min_temp == 5
+    assert thermostat.max_temp == 30
+    assert thermostat.target_temperature_step == 0.5
+
+
+def test_thermostat_setpoint_attribute_unit() -> None:
+    """Limits reported with a temperature unit are converted to the entity's."""
+    thermostat = _thermostat_with_setpoint_attrs(
+        "C", attr_unit="°F", minSetpoint="41", maxSetpoint="86", setpointStep="1.8"
+    )
+    assert thermostat.min_temp == pytest.approx(5)
+    assert thermostat.max_temp == pytest.approx(30)
+    assert thermostat.target_temperature_step == pytest.approx(1)
+
+
+def test_thermostat_setpoint_range_hub_unit_change() -> None:
+    """Default limits follow a hub temperature unit change."""
+    hub = Mock(token="token", temperature_unit=UnitOfTemperature.FAHRENHEIT)
+    device = create_thermostat_device()
+    del device.attributes[DeviceAttribute.TEMP_UNIT]
+    thermostat = HubitatThermostat(hub=hub, device=device)
+    assert thermostat.min_temp == 40
+    assert thermostat.max_temp == pytest.approx(95)
+
+    hub.temperature_unit = UnitOfTemperature.CELSIUS
+    thermostat.load_state()
+    assert temperature_attr(thermostat, "temperature_unit") == UnitOfTemperature.CELSIUS
+    assert thermostat.min_temp == pytest.approx(4.4)
+    assert thermostat.max_temp == pytest.approx(35)

@@ -89,9 +89,62 @@ If, for some reason, the event server needs to bind to a different port internal
 
 > ⚠️ Note that the event server URL, if specified, should only include a protocol and a host, _not_ a path. The server always listens at `/`.
 
+### Hub on a different network
+
+The integration assumes by default that Home Assistant and Hubitat are on the same local network, but it can also be used when they’re on different networks (for example, HA in the cloud or at another site). The basic requirements are the same as on a local network, they just aren’t handled automatically:
+
+1. Home Assistant must be able to reach the Maker API at the hub address you provide.
+2. Hubitat must be able to reach the integration’s event server at the event server URL.
+
+**Hub address.** The hub address can be a full URL with a scheme and an optional port, like `https://hub.example.com:8443`. The integration uses the scheme, host, and port you give and adds `/apps/api/<app id>` itself, so don’t include a path. A bare hostname or IP address (with or without a port) uses `http`. The integration doesn’t verify the hub’s SSL certificate, so a self-signed certificate on the hub side (or on a proxy in front of it) will work.
+
+**Event server.** Because the automatically selected event server URL is an address on HA’s local network, it won’t work from another network. Set the **event server URL** to an address Hubitat can use to reach HA, such as a public hostname or a VPN address, plus a fixed port (e.g., `http://ha.example.com:12345`). See [Event server](#event-server) for how the URL and **event server port** options work together; use the event server port if the port HA listens on is different from the one in the URL (for example, when a router forwards an external port to a different internal one).
+
+The event server binds to the local address HA uses to reach the hub, not to all interfaces. Any port forwarding, container port mapping, or reverse proxy needs to send traffic to that address and port. With [debug logging](#logging) enabled, the address and port are logged in a “Listening on …” message when the integration starts.
+
+To have the event server use HTTPS, provide paths to an SSL certificate and private key (for example, `/config/ssl/fullchain.pem` and `/config/ssl/privkey.pem`), and use `https` in the event server URL. If the certificate is self-signed, enable the “Ignore SSL Certificates” toggle in the Maker API app so Hubitat will accept it.
+
+**Security.** The Maker API access token is sent in the query string of every request, and anyone with the token can control the devices shared through Maker API. Avoid exposing the Maker API or the event server over plain HTTP on the public internet. The simplest option is usually to connect the two networks with a VPN such as WireGuard or Tailscale, and then use the VPN addresses for the hub address and the event server URL. Otherwise, put the hub and event server behind a reverse proxy that terminates TLS.
+
+> ⚠️ Hubitat’s cloud relay URLs (`https://cloud.hubitat.com/api/<hub uid>/...`) are not currently supported. HA needs to be able to talk to the hub directly. See [#118](https://github.com/jason0x43/hacs-hubitat/issues/118).
+
+If devices load but don’t update, see [Devices aren't updating](#devices-arent-updating).
+
 ### Device types
 
 The integration assigns Home Assistant device classes based on the capabilities reported by Hubitat. Sometimes the device type is ambiguous; a switchable outlet and a light switch may both only implement Hubitat’s [Switch](https://docs.hubitat.com/index.php?title=Driver_Capability_List#Switch) capability, and will therefore look like the same type of device to the integration. In some of these cases, the integration guesses the device class based on the device’s label (e.g., a switch named “Office Lamp” would be setup as a light in Home Assistant). This heuristic behavior is currently only used for lights and switches.
+
+### Color temperature range
+
+Hubitat has no standard attribute for the range of color temperatures a light supports, so lights use Home Assistant’s default range (2000-6535 K). A driver can report a light’s actual range with a custom `colorTemperatureRange` attribute. Its value must be a JSON list of 2 numbers — the minimum and maximum color temperature in Kelvin, in either order (e.g. `[2202, 6535]`). Values are rounded and sorted, acceptable range limits are 1-50000. If the attribute is missing or invalid (out of range, two equal values or not 2 values), the default range is used.
+
+In a Groovy driver, declare the attribute and send the range as an event:
+
+```groovy
+attribute 'colorTemperatureRange', 'string'
+
+sendEvent(name: 'colorTemperatureRange', value: "[${minKelvin}, ${maxKelvin}]")
+```
+
+Changes to the range are picked up on the next event from the device. If a driver starts reporting the attribute after the integration has loaded, reload the integration (see below).
+
+### Thermostat setpoint limits
+
+Hubitat has no standard attributes for the range of setpoints a thermostat accepts, so thermostats use a default range of 4.4-35 °C (40-95 °F). A driver can report a thermostat’s actual limits with custom `minSetpoint` and `maxSetpoint` number attributes, and the setpoint increment with a `setpointStep` number attribute. Values sent with a temperature unit (e.g. `°F`) are converted; values without one are assumed to be in the thermostat’s temperature unit (its `temperatureUnit` attribute, or the hub’s unit if that isn’t set). A missing or invalid limit uses its default. If the minimum isn’t below the maximum, the default range is used. A step that isn’t positive or is larger than the range is ignored.
+
+In a Groovy driver, declare the attributes and send the values as events:
+
+```groovy
+attribute 'minSetpoint', 'number'
+attribute 'maxSetpoint', 'number'
+attribute 'setpointStep', 'number'
+
+sendEvent(name: 'minSetpoint', value: 41)
+sendEvent(name: 'maxSetpoint', value: 90)
+sendEvent(name: 'setpointStep', value: 0.5)
+```
+
+Changes to the limits are picked up on the next event from the device. If a driver starts reporting the attributes after the integration has loaded, reload the integration (see below).
 
 ### Adding new devices
 
